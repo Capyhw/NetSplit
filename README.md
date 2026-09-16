@@ -32,18 +32,6 @@ cd macos
 
 打开后菜单栏会出现图标。切换服务顺序需要输入本机密码。
 
-### 命令行
-
-```bash
-chmod +x net-split
-./net-split on        # 分流
-./net-split off       # 恢复网线优先
-./net-split status
-./net-split check
-```
-
-可把 `net-split` 链到 `~/.local/bin`。CLI 和 App 共用 `~/.config/net-split/config.json` 与 `~/.cache/net-split/state`。
-
 ## 设置
 
 齿轮里可配：
@@ -77,7 +65,6 @@ NetSplit 改的是系统服务顺序。Clash / mihomo **TUN** 会再插 `utun` �
 ## 开发
 
 ```
-net-split                 # CLI
 macos/
   Sources/                # SwiftUI 菜单栏
   Resources/icon-1024.png
