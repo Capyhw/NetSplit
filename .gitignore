@@ -1,0 +1,10 @@
+macos/build/
+.DS_Store
+**/.DS_Store
+*.pkg
+*.dmg
+.idea/
+.vscode/
+*.xcuserstate
+*.xcworkspace
+xcuserdata/

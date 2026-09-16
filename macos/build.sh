@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+SRC="$ROOT/Sources"
+BUILD="$ROOT/build"
+APP="$BUILD/NetSplit.app"
+MACOS="$APP/Contents/MacOS"
+SDK="$(xcrun --show-sdk-path)"
+MIN_OS="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+BUNDLE_ID="com.weiyuhang.netsplit"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Info.plist")"
+DISPLAY_NAME="网卡分流"
+ICON_SRC="$ROOT/Resources/icon-1024.png"
+ICNS="$BUILD/AppIcon.icns"
+
+make_icns() {
+  [[ -f "$ICON_SRC" ]] || { echo "missing $ICON_SRC" >&2; return 1; }
+  local setdir="$BUILD/AppIcon.iconset"
+  rm -rf "$setdir" "$ICNS"
+  mkdir -p "$setdir"
+  local size name
+  for spec in \
+    "16 icon_16x16" \
+    "32 icon_16x16@2x" \
+    "32 icon_32x32" \
+    "64 icon_32x32@2x" \
+    "128 icon_128x128" \
+    "256 icon_128x128@2x" \
+    "256 icon_256x256" \
+    "512 icon_256x256@2x" \
+    "512 icon_512x512" \
+    "1024 icon_512x512@2x"
+  do
+    set -- $spec
+    sips -z "$1" "$1" "$ICON_SRC" --out "$setdir/${2}.png" >/dev/null
+  done
+  iconutil -c icns "$setdir" -o "$ICNS"
+  rm -rf "$setdir"
+}
+
+set_file_icon() {
+  local icon="$1" target="$2"
+  local helper="$BUILD/SetIcon"
+  if [[ ! -x "$helper" ]]; then
+    swiftc -O -framework AppKit -o "$helper" "$ROOT/packaging/SetIcon.swift"
+  fi
+  "$helper" "$icon" "$target"
+}
+
+build_app() {
+  rm -rf "$APP"
+  mkdir -p "$MACOS" "$APP/Contents/Resources"
+  make_icns
+
+  swiftc -parse-as-library -O \
+    -target "arm64-apple-macos${MIN_OS}" \
+    -sdk "$SDK" \
+    -framework SwiftUI \
+    -framework AppKit \
+    -framework Network \
+    -framework ServiceManagement \
+    -o "$MACOS/NetSplit" \
+    "$SRC"/*.swift
+
+  cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+  echo -n "APPL????" > "$APP/Contents/PkgInfo"
+  cp "$ICNS" "$APP/Contents/Resources/AppIcon.icns"
+
+  if command -v codesign >/dev/null; then
+    codesign --force --sign - --identifier "$BUNDLE_ID" "$APP" >/dev/null
+  fi
+
+  echo "built $APP"
+}
+
+# pkgbuild 在较新的 macOS 上会因 com.apple.provenance 打出
+# "write: Permission denied"，包仍然能写成，过滤掉即可。
+run_quiet() {
+  local log
+  log="$(mktemp)"
+  if ! "$@" >"$log" 2>&1; then
+    grep -vE '^(write: Permission denied$|\[.*completed\] ?)' "$log" >&2 || true
+    rm -f "$log"
+    return 1
+  fi
+  grep -vE '^(write: Permission denied$|\[.*completed\] ?)' "$log" || true
+  rm -f "$log"
+}
+
+build_pkg() {
+  [[ -d "$APP" ]] || build_app
+
+  local payload="$BUILD/pkgroot"
+  local scripts="$BUILD/pkgscripts"
+  local component="$BUILD/${DISPLAY_NAME}-component.pkg"
+  local dist="$BUILD/distribution.xml"
+  local pkg="$BUILD/${DISPLAY_NAME}-${VERSION}.pkg"
+
+  rm -rf "$payload" "$scripts" "$component" "$pkg"
+  mkdir -p "$payload" "$scripts"
+  ditto "$APP" "$payload/NetSplit.app"
+  cp "$ROOT/packaging/preinstall" "$ROOT/packaging/postinstall" "$scripts/"
+  chmod 755 "$scripts/preinstall" "$scripts/postinstall"
+
+  run_quiet pkgbuild \
+    --root "$payload" \
+    --identifier "$BUNDLE_ID" \
+    --version "$VERSION" \
+    --install-location /Applications \
+    --min-os-version "$MIN_OS" \
+    --scripts "$scripts" \
+    "$component"
+
+  cat >"$dist" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>${DISPLAY_NAME}</title>
+    <organization>com.weiyuhang</organization>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <pkg-ref id="${BUNDLE_ID}"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="${BUNDLE_ID}"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="${BUNDLE_ID}" visible="false">
+        <pkg-ref id="${BUNDLE_ID}"/>
+    </choice>
+    <pkg-ref id="${BUNDLE_ID}" version="${VERSION}" onConclusion="none">${DISPLAY_NAME}-component.pkg</pkg-ref>
+    <os-version min="${MIN_OS}"/>
+</installer-gui-script>
+EOF
+
+  cat >"$BUILD/welcome.html" <<EOF
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head><meta charset="utf-8"></head>
+<body style="font-family:-apple-system;font-size:13px;line-height:1.5">
+<p>将「${DISPLAY_NAME}」安装到「应用程序」文件夹。</p>
+<p>安装后菜单栏会出现网线 / Wi-Fi 图标，用于在 Wi-Fi 上网和网线内网之间切换。</p>
+<p>切换服务顺序时需要输入本机密码。</p>
+</body>
+</html>
+EOF
+
+  run_quiet productbuild \
+    --distribution "$dist" \
+    --package-path "$BUILD" \
+    --resources "$BUILD" \
+    "$pkg"
+
+  rm -f "$component"
+  echo "pkg  $pkg"
+}
+
+build_dmg() {
+  [[ -d "$APP" ]] || build_app
+
+  local stage="$BUILD/dmg"
+  local dmg="$BUILD/${DISPLAY_NAME}-${VERSION}.dmg"
+
+  rm -rf "$stage" "$dmg"
+  mkdir -p "$stage"
+  make_icns
+  ditto "$APP" "$stage/${DISPLAY_NAME}.app"
+  ln -s /Applications "$stage/Applications"
+  cp "$ICNS" "$stage/.VolumeIcon.icns"
+  if command -v SetFile >/dev/null; then
+    SetFile -c icnC "$stage/.VolumeIcon.icns" 2>/dev/null || true
+    SetFile -a C "$stage" 2>/dev/null || true
+  fi
+
+  run_quiet diskutil image create from \
+    --format UDZO \
+    --volumeName "$DISPLAY_NAME" \
+    "$stage" \
+    "$dmg"
+
+  set_file_icon "$ICON_SRC" "$dmg" || true
+  echo "dmg  $dmg"
+}
+
+cmd="${1:-build}"
+case "$cmd" in
+  build|"")
+    build_app
+    ;;
+  open)
+    build_app
+    pkill -x NetSplit 2>/dev/null || true
+    open "$APP"
+    ;;
+  install)
+    build_app
+    DEST="/Applications/NetSplit.app"
+    pkill -x NetSplit 2>/dev/null || true
+    rm -rf "$DEST"
+    cp -R "$APP" "$DEST"
+    echo "installed $DEST"
+    open "$DEST"
+    ;;
+  pkg)
+    build_app
+    build_pkg
+    ;;
+  dmg)
+    build_app
+    build_dmg
+    ;;
+  dist)
+    build_app
+    build_pkg
+    build_dmg
+    ls -lh "$BUILD"/*.pkg "$BUILD"/*.dmg
+    ;;
+  *)
+    cat <<'EOF'
+用法: build.sh [build|open|install|pkg|dmg|dist]
+
+  build    只编译 .app
+  open     编译并运行
+  install  编译并拷到 /Applications
+  pkg      生成安装包 .pkg（装到「应用程序」）
+  dmg      生成磁盘映像 .dmg（拖到 Applications）
+  dist     同时打 pkg 和 dmg
+EOF
+    exit 2
+    ;;
+esac

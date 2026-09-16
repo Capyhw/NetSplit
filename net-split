@@ -1,0 +1,408 @@
+#!/usr/bin/env bash
+# net-split — 双网卡分流切换
+#
+# on : Wi-Fi 走默认上网；网线保留内网 / GitLab
+# off: 恢复网线优先（macOS 默认行为）
+# 服务顺序会记住，重启不用再 on。
+
+set -euo pipefail
+
+ETH_SERVICE_DEFAULT="USB 10/100/1G/2.5G LAN"
+WIFI_SERVICE_DEFAULT="Wi-Fi"
+load_json_config() {
+  local f="${XDG_CONFIG_HOME:-$HOME/.config}/net-split/config.json"
+  [[ -f "$f" ]] || return 0
+  python3 - "$f" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    raise SystemExit(0)
+def emit(key, env):
+    v = d.get(key)
+    if v is None or v == "":
+        return
+    print(f"{env}={v}")
+emit("proxyHost", "CFG_LAN_PROXY")
+emit("proxyPort", "CFG_LAN_PROXY_PORT")
+emit("probeHost", "CFG_PROBE_HOST")
+emit("ethernetService", "CFG_ETH_SERVICE")
+emit("wifiService", "CFG_WIFI_SERVICE")
+PY
+}
+
+while IFS='=' read -r k v; do
+  [[ -n "$k" ]] || continue
+  export "$k=$v"
+done < <(load_json_config)
+
+LAN_PROXY="${LAN_PROXY:-${CFG_LAN_PROXY:-}}"
+LAN_PROXY_PORT="${LAN_PROXY_PORT:-${CFG_LAN_PROXY_PORT:-}}"
+PROBE_HOST="${PROBE_HOST:-${CFG_PROBE_HOST:-}}"
+ETH_SERVICE="${ETH_SERVICE:-${CFG_ETH_SERVICE:-}}"
+WIFI_SERVICE="${WIFI_SERVICE:-${CFG_WIFI_SERVICE:-}}"
+
+# 网线直连网段系统会自己走。未配置局域网代理时，GitLab 走网线直连。
+# 下面两条是旧版 on 留下的，on/off 时顺手清掉。
+LEGACY_NETS=(
+  "10.222.0.0/16"
+  "172.16.0.0/12"
+)
+
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/net-split"
+STATE_FILE="$STATE_DIR/state"
+
+usage() {
+  cat <<'EOF'
+用法: net-split <on|off|status|check>
+
+  on      Wi-Fi 默认上网，GitLab / 内网走网线
+  off     恢复网线优先
+  status  看当前出口和模式
+  check   探测默认路由、GitLab、可选局域网代理
+
+环境变量:
+  ETH_SERVICE  网线服务名（默认自动识别）
+  WIFI_SERVICE Wi-Fi 服务名（默认 Wi-Fi）
+  LAN_PROXY    局域网代理 IP（留空则网线直连 GitLab）
+EOF
+}
+
+need_sudo() {
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+list_services() {
+  networksetup -listallnetworkservices | awk 'NR>1 && $0 != "" { sub(/^\* ?/, ""); print }'
+}
+
+service_device() {
+  local name="$1"
+  networksetup -listnetworkserviceorder | awk -v n="$name" '
+    $0 ~ "Hardware Port: " n "," {
+      if (match($0, /Device: [^)]+/)) {
+        d = substr($0, RSTART + 8, RLENGTH - 8)
+        print d
+        exit
+      }
+    }'
+}
+
+service_gateway() {
+  local dev="$1"
+  local svc="${2:-}"
+  local gw=""
+
+  # DHCP 网卡
+  gw="$(ipconfig getoption "$dev" router 2>/dev/null || true)"
+  if [[ -n "$gw" ]]; then
+    echo "$gw"
+    return
+  fi
+
+  # 手动配置：ipconfig getoption 没有 router
+  if [[ -n "$svc" ]]; then
+    gw="$(networksetup -getinfo "$svc" 2>/dev/null | awk -F': ' '/^Router:/{print $2; exit}')"
+    if [[ -n "$gw" && "$gw" != "none" ]]; then
+      echo "$gw"
+      return
+    fi
+  fi
+
+  gw="$(netstat -rn -f inet | awk -v d="$dev" '$1 == "default" && $NF == d { print $2; exit }')"
+  echo "$gw"
+}
+
+service_ip() {
+  local dev="$1"
+  ipconfig getifaddr "$dev" 2>/dev/null || true
+}
+
+detect_eth_service() {
+  if [[ -n "${ETH_SERVICE:-}" ]]; then
+    echo "$ETH_SERVICE"
+    return
+  fi
+  local s
+  while IFS= read -r s; do
+    case "$s" in
+      "$ETH_SERVICE_DEFAULT"|*"LAN"*|*"Ethernet"*|*"以太网"*)
+        echo "$s"
+        return
+        ;;
+    esac
+  done < <(list_services)
+  echo "$ETH_SERVICE_DEFAULT"
+}
+
+detect_wifi_service() {
+  if [[ -n "${WIFI_SERVICE:-}" ]]; then
+    echo "$WIFI_SERVICE"
+    return
+  fi
+  local s
+  while IFS= read -r s; do
+    case "$s" in
+      "$WIFI_SERVICE_DEFAULT"|Wi-Fi|WiFi|"无线局域网")
+        echo "$s"
+        return
+        ;;
+    esac
+  done < <(list_services)
+  echo "$WIFI_SERVICE_DEFAULT"
+}
+
+current_order() {
+  list_services | paste -sd ',' -
+}
+
+reorder() {
+  local first="$1"
+  shift
+  local rest=("$@")
+  local -a ordered=("$first")
+  local s
+  for s in "${rest[@]}"; do
+    [[ "$s" == "$first" ]] && continue
+    ordered+=("$s")
+  done
+  need_sudo networksetup -ordernetworkservices "${ordered[@]}"
+}
+
+default_iface() {
+  route -n get 1.1.1.1 2>/dev/null | awk '/interface:/{print $2}'
+}
+
+host_iface() {
+  local host="$1"
+  route -n get "$host" 2>/dev/null | awk '/interface:/{print $2}'
+}
+
+route_exists() {
+  local net="$1"
+  local addr="${net%%/*}"
+  local dest
+  dest="$(route -n get "$addr" 2>/dev/null | awk '/destination:/{print $2; exit}')"
+  [[ -n "$dest" && "$dest" != "default" ]]
+}
+
+del_legacy_routes() {
+  local net
+  local any=0
+  for net in "${LEGACY_NETS[@]}"; do
+    if route_exists "$net"; then
+      any=1
+      need_sudo route -n delete -net "$net" >/dev/null 2>&1 || true
+      echo "  - 去掉旧路由 $net"
+    fi
+  done
+  [[ "$any" -eq 1 ]] || true
+}
+
+save_state() {
+  mkdir -p "$STATE_DIR"
+  cat >"$STATE_FILE" <<EOF
+MODE=$1
+PREV_ORDER=$2
+ETH_GW=$3
+SAVED_AT=$(date +%Y-%m-%dT%H:%M:%S)
+EOF
+}
+
+load_state() {
+  MODE=""
+  PREV_ORDER=""
+  ETH_GW=""
+  [[ -f "$STATE_FILE" ]] || return 1
+  # shellcheck disable=SC1090
+  source "$STATE_FILE"
+}
+
+cmd_on() {
+  local eth wifi eth_dev wifi_dev eth_gw wifi_gw
+  local -a services
+  eth="$(detect_eth_service)"
+  wifi="$(detect_wifi_service)"
+  eth_dev="$(service_device "$eth")"
+  wifi_dev="$(service_device "$wifi")"
+  eth_gw="$(service_gateway "$eth_dev" "$eth")"
+  wifi_gw="$(service_gateway "$wifi_dev" "$wifi")"
+
+  [[ -n "$eth_dev" ]] || { echo "找不到网线设备: $eth" >&2; exit 1; }
+  [[ -n "$wifi_dev" ]] || { echo "找不到 Wi-Fi 设备: $wifi" >&2; exit 1; }
+  [[ -n "$(service_ip "$eth_dev")" ]] || { echo "网线 $eth ($eth_dev) 没有 IP，确认已插网线" >&2; exit 1; }
+  [[ -n "$(service_ip "$wifi_dev")" ]] || { echo "Wi-Fi $wifi ($wifi_dev) 没有 IP" >&2; exit 1; }
+  [[ -n "$eth_gw" ]] || { echo "读不到网线网关" >&2; exit 1; }
+  [[ -n "$wifi_gw" ]] || { echo "读不到 Wi-Fi 网关" >&2; exit 1; }
+
+  echo "网线 : $eth  $eth_dev  $(service_ip "$eth_dev")  gw $eth_gw"
+  echo "Wi-Fi: $wifi  $wifi_dev  $(service_ip "$wifi_dev")  gw $wifi_gw"
+
+  local prev
+  prev="$(current_order)"
+  if [[ ! -f "$STATE_FILE" ]]; then
+    save_state "off" "$prev" "$eth_gw"
+  else
+    load_state || true
+    [[ -n "${PREV_ORDER:-}" ]] || PREV_ORDER="$prev"
+    save_state "split" "$PREV_ORDER" "$eth_gw"
+  fi
+
+  echo "切换服务顺序: $wifi 优先"
+  while IFS= read -r s; do
+    services+=("$s")
+  done < <(list_services)
+  reorder "$wifi" "${services[@]}"
+
+  del_legacy_routes
+  save_state "split" "${PREV_ORDER:-$prev}" "$eth_gw"
+
+  echo
+  cmd_status
+  echo
+  cmd_check || true
+}
+
+cmd_off() {
+  local eth
+  local -a services prev_arr
+  eth="$(detect_eth_service)"
+  load_state || true
+
+  del_legacy_routes
+
+  if [[ -n "${PREV_ORDER:-}" ]]; then
+    IFS=',' read -r -a prev_arr <<<"$PREV_ORDER"
+    echo "恢复服务顺序: ${PREV_ORDER//,/, }"
+    need_sudo networksetup -ordernetworkservices "${prev_arr[@]}"
+  else
+    echo "没有历史顺序，把网线放到第一"
+    while IFS= read -r s; do
+      services+=("$s")
+    done < <(list_services)
+    reorder "$eth" "${services[@]}"
+  fi
+
+  save_state "off" "${PREV_ORDER:-$(current_order)}" "${ETH_GW:-}"
+  echo
+  cmd_status
+}
+
+cmd_status() {
+  local eth wifi eth_dev wifi_dev def lan_if mode
+  eth="$(detect_eth_service)"
+  wifi="$(detect_wifi_service)"
+  eth_dev="$(service_device "$eth")"
+  wifi_dev="$(service_device "$wifi")"
+  def="$(default_iface)"
+  lan_if=""
+  if [[ -n "$LAN_PROXY" ]]; then
+    lan_if="$(host_iface "$LAN_PROXY")"
+  fi
+
+  if [[ "$def" == "$wifi_dev" ]]; then
+    mode="split（Wi-Fi 上网 / 网线内网）"
+  elif [[ "$def" == "$eth_dev" ]]; then
+    mode="网线优先（未分流）"
+  else
+    mode="未知"
+  fi
+
+  echo "模式        : $mode"
+  echo "服务顺序    :"
+  networksetup -listnetworkserviceorder | awk '
+    /^\([0-9]+\)/ { name=$0; sub(/^\([0-9]+\) /, "", name); n=name }
+    /Device:/ {
+      if (match($0, /Device: [^)]+/)) {
+        d = substr($0, RSTART + 8, RLENGTH - 8)
+        printf "  %-32s %s\n", n, d
+      }
+    }'
+  echo "默认出口    : ${def:-?}  (1.1.1.1)"
+  if [[ -n "$LAN_PROXY" ]]; then
+    echo "LAN 代理    : $LAN_PROXY  ->  ${lan_if:-?}"
+  else
+    echo "LAN 代理    : 未设置（网线直连）"
+  fi
+  if [[ -n "$PROBE_HOST" ]]; then
+    echo "GitLab DNS  : $(dscacheutil -q host -a name "$PROBE_HOST" 2>/dev/null | awk '/ip_address/{print $2; exit}')"
+  fi
+}
+
+cmd_check() {
+  local eth_dev wifi_dev def lan_if
+  eth_dev="$(service_device "$(detect_eth_service)")"
+  wifi_dev="$(service_device "$(detect_wifi_service)")"
+  def="$(default_iface)"
+  lan_if=""
+  if [[ -n "$LAN_PROXY" ]]; then
+    lan_if="$(host_iface "$LAN_PROXY")"
+  fi
+  local fail=0
+
+  printf "默认路由 1.1.1.1     "
+  if [[ "$def" == "$wifi_dev" ]]; then
+    echo "OK  ${def}  (Wi-Fi)"
+  elif [[ "$def" == "$eth_dev" ]]; then
+    echo "网线 ${def}  (未分流)"
+  else
+    echo "异常 ${def:-?}"
+    fail=1
+  fi
+
+  if [[ -n "$LAN_PROXY" ]]; then
+    printf "LAN 代理路由         "
+    if [[ "$lan_if" == "$eth_dev" ]]; then
+      echo "OK  $LAN_PROXY -> $lan_if"
+    else
+      echo "失败 ${LAN_PROXY} -> ${lan_if:-none} (应走 ${eth_dev})"
+      fail=1
+    fi
+
+    if [[ -n "$LAN_PROXY_PORT" ]]; then
+      printf "LAN 代理端口         "
+      if nc -z -G 2 "$LAN_PROXY" "$LAN_PROXY_PORT" >/dev/null 2>&1; then
+        echo "OK  $LAN_PROXY:$LAN_PROXY_PORT"
+      else
+        echo "不通 $LAN_PROXY:$LAN_PROXY_PORT"
+        fail=1
+      fi
+    fi
+  fi
+
+  if [[ -n "$PROBE_HOST" ]]; then
+    printf "GitLab DNS           "
+    local ip
+    ip="$(dscacheutil -q host -a name "$PROBE_HOST" 2>/dev/null | awk '/ip_address/{print $2; exit}')"
+    if [[ -n "$ip" ]]; then
+      echo "OK  $ip"
+    else
+      echo "解析失败"; fail=1
+    fi
+  fi
+
+  return "$fail"
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    on|split|wifi) cmd_on ;;
+    off|restore|eth) cmd_off ;;
+    status|st) cmd_status ;;
+    check|ck) cmd_check ;;
+    -h|--help|help|"") usage ;;
+    *)
+      echo "未知命令: $cmd" >&2
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

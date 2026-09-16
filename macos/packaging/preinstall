@@ -1,0 +1,4 @@
+#!/bin/bash
+# 覆盖安装前先退出旧进程
+pkill -x NetSplit 2>/dev/null || true
+exit 0
