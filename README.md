@@ -32,6 +32,28 @@ cd macos
 
 打开后菜单栏会出现图标。切换服务顺序需要输入本机密码。
 
+也可从 [Releases](https://github.com/Capyhw/NetSplit/releases) 下载 `.dmg` / `.pkg`。未做 Apple 公证，第一次打开请右键 → 打开。
+
+## 发布 Release
+
+版本号在 `macos/Info.plist` 的 `CFBundleShortVersionString`。打 tag 并推送后，GitHub Actions 会编译并创建 Release：
+
+```bash
+# 1. 改 Info.plist 版本，提交
+# 2. 打 tag（与版本号一致）
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+在仓库页面也可以：右侧 **Releases → Draft a new release → Choose a tag → 填标题 → Publish**。若已配置 Actions，推送 `v*` tag 会自动挂上安装包。
+
+本地手动发布：
+
+```bash
+./macos/build.sh dist
+gh release create v0.3.0 macos/build/*.dmg macos/build/*.pkg --generate-notes
+```
+
 ## 设置
 
 齿轮里可配：

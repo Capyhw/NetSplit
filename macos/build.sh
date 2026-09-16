@@ -8,6 +8,7 @@ APP="$BUILD/NetSplit.app"
 MACOS="$APP/Contents/MacOS"
 SDK="$(xcrun --show-sdk-path)"
 MIN_OS="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+ARCH="$(uname -m)"
 BUNDLE_ID="com.weiyuhang.netsplit"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Info.plist")"
 DISPLAY_NAME="网卡分流"
@@ -54,7 +55,7 @@ build_app() {
   make_icns
 
   swiftc -parse-as-library -O \
-    -target "arm64-apple-macos${MIN_OS}" \
+    -target "${ARCH}-apple-macos${MIN_OS}" \
     -sdk "$SDK" \
     -framework SwiftUI \
     -framework AppKit \
@@ -173,11 +174,20 @@ build_dmg() {
     SetFile -a C "$stage" 2>/dev/null || true
   fi
 
-  run_quiet diskutil image create from \
-    --format UDZO \
-    --volumeName "$DISPLAY_NAME" \
-    "$stage" \
-    "$dmg"
+  if diskutil help image >/dev/null 2>&1; then
+    run_quiet diskutil image create from \
+      --format UDZO \
+      --volumeName "$DISPLAY_NAME" \
+      "$stage" \
+      "$dmg"
+  else
+    run_quiet hdiutil create \
+      -volname "$DISPLAY_NAME" \
+      -srcfolder "$stage" \
+      -ov \
+      -format UDZO \
+      "$dmg"
+  fi
 
   set_file_icon "$ICON_SRC" "$dmg" || true
   echo "dmg  $dmg"
