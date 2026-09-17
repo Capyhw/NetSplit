@@ -174,7 +174,11 @@ build_dmg() {
     SetFile -a C "$stage" 2>/dev/null || true
   fi
 
-  if diskutil help image >/dev/null 2>&1; then
+  # 只看 `diskutil image` 是否存在不够：较老的系统有这个子命令，
+  # 但 create from 还不认 --volumeName，会直接报错退出。要探到参数级。
+  local diskutil_help=""
+  diskutil_help="$(diskutil image create from --help 2>&1 || true)"
+  if grep -q -- '--volumeName' <<<"$diskutil_help"; then
     run_quiet diskutil image create from \
       --format UDZO \
       --volumeName "$DISPLAY_NAME" \
