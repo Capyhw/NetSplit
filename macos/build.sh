@@ -12,6 +12,10 @@ ARCH="$(uname -m)"
 BUNDLE_ID="com.weiyuhang.netsplit"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Info.plist")"
 DISPLAY_NAME="网卡分流"
+# 产物文件名必须是 ASCII：GitHub 创建 Release 资产时会剥掉非 ASCII 字符，
+# 用中文名传上去会变成 "-0.4.0.dmg"。只有文件名受这个限制，
+# App 装出来的名字和安装器里给用户看的文案都照旧用 DISPLAY_NAME。
+ARTIFACT_NAME="NetSplit"
 ICON_SRC="$ROOT/Resources/icon-1024.png"
 ICNS="$BUILD/AppIcon.icns"
 
@@ -94,9 +98,9 @@ build_pkg() {
 
   local payload="$BUILD/pkgroot"
   local scripts="$BUILD/pkgscripts"
-  local component="$BUILD/${DISPLAY_NAME}-component.pkg"
+  local component="$BUILD/${ARTIFACT_NAME}-component.pkg"
   local dist="$BUILD/distribution.xml"
-  local pkg="$BUILD/${DISPLAY_NAME}-${VERSION}.pkg"
+  local pkg="$BUILD/${ARTIFACT_NAME}-${VERSION}.pkg"
 
   rm -rf "$payload" "$scripts" "$component" "$pkg"
   mkdir -p "$payload" "$scripts"
@@ -130,7 +134,7 @@ build_pkg() {
     <choice id="${BUNDLE_ID}" visible="false">
         <pkg-ref id="${BUNDLE_ID}"/>
     </choice>
-    <pkg-ref id="${BUNDLE_ID}" version="${VERSION}" onConclusion="none">${DISPLAY_NAME}-component.pkg</pkg-ref>
+    <pkg-ref id="${BUNDLE_ID}" version="${VERSION}" onConclusion="none">${ARTIFACT_NAME}-component.pkg</pkg-ref>
     <os-version min="${MIN_OS}"/>
 </installer-gui-script>
 EOF
@@ -161,7 +165,7 @@ build_dmg() {
   [[ -d "$APP" ]] || build_app
 
   local stage="$BUILD/dmg"
-  local dmg="$BUILD/${DISPLAY_NAME}-${VERSION}.dmg"
+  local dmg="$BUILD/${ARTIFACT_NAME}-${VERSION}.dmg"
 
   rm -rf "$stage" "$dmg"
   mkdir -p "$stage"
