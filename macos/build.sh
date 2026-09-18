@@ -53,6 +53,23 @@ set_file_icon() {
   "$helper" "$icon" "$target"
 }
 
+# 每次构建都从空的 build/ 开始。
+#
+# 否则上一轮产物会留在目录里：换了版本号时旧的 dmg/pkg 不会被覆盖，
+# `dist` 结尾的 ls 会把陈货一起列出来，Release 工作流的 *.dmg / *.pkg
+# 通配也可能把旧版本一起传上去。
+#
+# 必须在 build_app 之前调用：build_pkg / build_dmg 里都有
+# `[[ -d "$APP" ]] || build_app`，先清会把刚编译好的 app 删掉。
+clean_build() {
+  [[ "$BUILD" == "$ROOT/build" ]] || {
+    echo "clean_build: 拒绝删除预期之外的路径 $BUILD" >&2
+    return 1
+  }
+  rm -rf "$BUILD"
+  mkdir -p "$BUILD"
+}
+
 build_app() {
   rm -rf "$APP"
   mkdir -p "$MACOS" "$APP/Contents/Resources"
@@ -204,14 +221,17 @@ build_dmg() {
 cmd="${1:-build}"
 case "$cmd" in
   build|"")
+    clean_build
     build_app
     ;;
   open)
+    clean_build
     build_app
     pkill -x NetSplit 2>/dev/null || true
     open "$APP"
     ;;
   install)
+    clean_build
     build_app
     DEST="/Applications/${DISPLAY_NAME}.app"
     pkill -x NetSplit 2>/dev/null || true
@@ -221,14 +241,17 @@ case "$cmd" in
     open "$DEST"
     ;;
   pkg)
+    clean_build
     build_app
     build_pkg
     ;;
   dmg)
+    clean_build
     build_app
     build_dmg
     ;;
   dist)
+    clean_build
     build_app
     build_pkg
     build_dmg
@@ -244,6 +267,8 @@ case "$cmd" in
   pkg      生成安装包 .pkg（装到「应用程序」）
   dmg      生成磁盘映像 .dmg（拖到 Applications）
   dist     同时打 pkg 和 dmg
+
+每个命令都会先清空 build/，再从干净的目录开始编译。
 EOF
     exit 2
     ;;
