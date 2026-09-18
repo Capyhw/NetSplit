@@ -1,5 +1,5 @@
 #!/bin/bash
-APP="/Applications/NetSplit.app"
+APP="/Applications/网卡分流.app"
 [[ -d "$APP" ]] || exit 0
 
 CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"

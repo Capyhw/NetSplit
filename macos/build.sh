@@ -100,7 +100,7 @@ build_pkg() {
 
   rm -rf "$payload" "$scripts" "$component" "$pkg"
   mkdir -p "$payload" "$scripts"
-  ditto "$APP" "$payload/NetSplit.app"
+  ditto "$APP" "$payload/${DISPLAY_NAME}.app"
   cp "$ROOT/packaging/preinstall" "$ROOT/packaging/postinstall" "$scripts/"
   chmod 755 "$scripts/preinstall" "$scripts/postinstall"
 
@@ -209,7 +209,7 @@ case "$cmd" in
     ;;
   install)
     build_app
-    DEST="/Applications/NetSplit.app"
+    DEST="/Applications/${DISPLAY_NAME}.app"
     pkill -x NetSplit 2>/dev/null || true
     rm -rf "$DEST"
     cp -R "$APP" "$DEST"
