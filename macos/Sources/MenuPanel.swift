@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct MenuPanel: View {
@@ -20,6 +21,7 @@ struct MenuPanel: View {
         }
         .padding(14)
         .frame(width: 340)
+        .background(PanelWindowFitter())
         .onAppear { model.refresh() }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             if !model.busy, !model.showSettings { model.refresh() }
@@ -300,6 +302,67 @@ struct MenuPanel: View {
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+/// MenuBarExtra 的面板窗口只涨不缩：设置页比主界面高，从设置页退回来之后窗口还是那么高，
+/// 多出来的空间把内容垂直居中——面板上下边界于是"缩进去"，窗口的圆角、阴影落在内容之外。
+/// 这里在每次布局之后把窗口高度对齐回内容的实际高度（上沿不动，面板始终贴着菜单栏），
+/// 让面板跟着内容一起收放，而不是把高度写死。
+private struct PanelWindowFitter: NSViewRepresentable {
+    /// 面板内容的合理高度区间：万一量歪了（取到的不是承载 SwiftUI 的那一层），
+    /// 宁可按老样子显示，也不要把面板裁掉或者撑成一大条。
+    private static let plausibleHeight: ClosedRange<CGFloat> = 200...1200
+
+    func makeNSView(context: Context) -> NSView {
+        let view = FitterView(frame: .zero)
+        view.isHidden = true
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        // 等这一轮布局落定，内容高度才是最终值。
+        DispatchQueue.main.async { Self.fit(view) }
+    }
+
+    fileprivate static func fit(_ view: NSView) {
+        guard let window = view.window, let content = window.contentView else { return }
+        let height = contentHeight(in: content)
+        guard plausibleHeight.contains(height), abs(window.frame.height - height) > 0.5 else { return }
+        let top = window.frame.maxY
+        var frame = window.frame
+        frame.size.height = height
+        frame.origin.y = top - height
+        window.setFrame(frame, display: true)
+        // 窗口是系统在管的，它可能隔一拍又按旧高度摆回来，所以再确认一次。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { fit(view) }
+    }
+
+    /// 承载 SwiftUI 的视图的理想高度就是内容高度。面板窗口的 contentView 是
+    /// MenuBarExtraHostingView，它自己报不出来（返回 0），真正承载 SwiftUI 的那层在它里面，
+    /// 所以往下找，取能报出高度的最大值。
+    private static func contentHeight(in view: NSView) -> CGFloat {
+        var height = isHosting(view) ? view.fittingSize.height : 0
+        for sub in view.subviews {
+            height = max(height, contentHeight(in: sub))
+        }
+        if height <= 1, !isHosting(view) { height = view.fittingSize.height }
+        return height
+    }
+
+    private static func isHosting(_ view: NSView) -> Bool {
+        String(describing: type(of: view)).contains("Hosting")
+    }
+}
+
+/// 面板每次打开都是把内容重新挂到窗口上，这时候窗口还留着上一轮的高度，也要对齐一次。
+private final class FitterView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        // 挂上去的那一刻内容还没布局完，量不到高度，隔一拍再确认一次。
+        DispatchQueue.main.async { PanelWindowFitter.fit(self) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { PanelWindowFitter.fit(self) }
     }
 }
 
