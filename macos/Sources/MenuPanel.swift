@@ -21,6 +21,11 @@ struct MenuPanel: View {
         }
         .padding(14)
         .frame(width: 340)
+        .overlay(alignment: .bottom) {
+            // 动画只圈住浮层自己：加在根视图上会把整棵子树拖进动画事务，
+            // 面板那层毛玻璃会跟着重算。
+            toast.animation(.easeInOut(duration: 0.18), value: model.updateMessage)
+        }
         .background(PanelWindowFitter())
         .onAppear { model.refresh() }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
@@ -208,25 +213,39 @@ struct MenuPanel: View {
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Toggle("登录时启动", isOn: launchAtLoginBinding)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 11))
-                Spacer(minLength: 4)
-                Button("刷新") { model.refresh() }
-                    .disabled(model.busy)
-                updateButton
-                Button("退出") { model.quit() }
-            }
-            if let message = model.updateMessage {
-                Text(message)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+        HStack {
+            Toggle("登录时启动", isOn: launchAtLoginBinding)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+            Spacer(minLength: 4)
+            Button("刷新") { model.refresh() }
+                .disabled(model.busy)
+            updateButton
+            Button("退出") { model.quit() }
         }
         .controlSize(.small)
         .font(.system(size: 11))
+    }
+
+    /// 「已是最新」这类一闪而过的反馈做成浮层：overlay 不参与布局
+    /// （官方文档：基准视图决定最终布局尺寸），面板高度就不会因为多了一行字而变化。
+    /// 浮层不吃点击，不会挡住底下的按钮。
+    ///
+    /// 底色用不透光的纯色，不用 material —— 面板窗口本身就是毛玻璃，
+    /// 在里面再叠一层 material 会让整块面板的 backdrop 重算（看起来变透）。
+    @ViewBuilder
+    private var toast: some View {
+        if let message = model.updateMessage {
+            Text(message)
+                .font(.system(size: 11))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+                .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 0.5))
+                .padding(.bottom, 6)
+                .allowsHitTesting(false)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 
     @ViewBuilder
