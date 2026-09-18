@@ -206,17 +206,39 @@ struct MenuPanel: View {
     }
 
     private var footer: some View {
-        HStack {
-            Toggle("登录时启动", isOn: launchAtLoginBinding)
-                .toggleStyle(.checkbox)
-                .font(.system(size: 11))
-            Spacer()
-            Button("刷新") { model.refresh() }
-                .disabled(model.busy)
-            Button("退出") { model.quit() }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Toggle("登录时启动", isOn: launchAtLoginBinding)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+                Spacer(minLength: 4)
+                Button("刷新") { model.refresh() }
+                    .disabled(model.busy)
+                updateButton
+                Button("退出") { model.quit() }
+            }
+            if let message = model.updateMessage {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
         }
         .controlSize(.small)
         .font(.system(size: 11))
+    }
+
+    @ViewBuilder
+    private var updateButton: some View {
+        if let update = model.availableUpdate {
+            Button(action: model.openReleasePage) {
+                Label("更新到 v\(update.version)", systemImage: "arrow.down.circle")
+            }
+            .buttonStyle(.borderedProminent)
+            .help(update.notes)
+        } else {
+            Button("检查更新") { model.checkForUpdates(manual: true) }
+                .disabled(model.checkingUpdate)
+        }
     }
 
     private var launchAtLoginBinding: Binding<Bool> {

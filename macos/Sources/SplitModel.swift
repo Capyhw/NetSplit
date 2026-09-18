@@ -13,6 +13,11 @@ final class SplitModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var launchAtLogin = false
     @Published var lastRefresh: Date?
+    @Published var checkingUpdate = false
+    @Published var availableUpdate: ReleaseInfo?
+    @Published var updateMessage: String?
+
+    private var updateMessageToken = 0
 
     var menuSymbol: String {
         switch snapshot.mode {
@@ -42,6 +47,7 @@ final class SplitModel: ObservableObject {
     init() {
         launchAtLogin = SMAppService.mainApp.status == .enabled
         refresh()
+        checkForUpdates(manual: false)
     }
 
     func refresh() {
@@ -145,6 +151,42 @@ final class SplitModel: ObservableObject {
 
     func quit() {
         NSApp.terminate(nil)
+    }
+
+    // MARK: - 检查更新
+
+    /// 启动时静默查一次；手动检查才回写 updateMessage。
+    func checkForUpdates(manual: Bool) {
+        if manual, checkingUpdate { return }
+        checkingUpdate = true
+        Task {
+            let result = await UpdateChecker.latestRelease()
+            checkingUpdate = false
+            switch result {
+            case .available(let info):
+                availableUpdate = info
+            case .upToDate:
+                if manual { showUpdateMessage("已是最新") }
+            case .failed:
+                if manual { showUpdateMessage("检查更新失败") }
+            }
+        }
+    }
+
+    func openReleasePage() {
+        guard let info = availableUpdate else { return }
+        NSWorkspace.shared.open(info.url)
+    }
+
+    /// 3 秒后自动清空，用递增令牌保证只清掉自己写的那条。
+    private func showUpdateMessage(_ text: String) {
+        updateMessage = text
+        updateMessageToken += 1
+        let token = updateMessageToken
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            if updateMessageToken == token { updateMessage = nil }
+        }
     }
 
     private func runChange(_ work: @escaping () throws -> Void) {
